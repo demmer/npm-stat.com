@@ -56,7 +56,7 @@ function getURLParam(name) {
   return match[1];
 }
 
-function chart(id, type, title, data, xAxisType, xAxisTitle, cats) {
+function chart(id, type, title, data, xAxisType, xAxisTitle, cats, trend) {
   return new Highcharts.Chart({
     chart: {
       renderTo: id,
@@ -129,142 +129,59 @@ function chart(id, type, title, data, xAxisType, xAxisTitle, cats) {
         shadow: false
       },
       line: {
-        color: '#AA0000',
+        color: '#006666',
         lineWidth: 1,
         marker: {
           radius: 2
         }
       }
     },
-    series: [{
-      name: 'Downloads',
-      data: data
-    }]
+    series: trend ?
+      [{name: 'Downloads', data: data},
+       {name: (xAxisTitle == 'Day' ? '30 Day' : '10 Week') + ' Avg', data: trend, type: 'line'}]
+      :[{name: 'Downloads', data: data}]
   });
 }
 
-var oneDay = 24 * 60 * 60 * 1000;
-
 function totalDownloads(data) {
   var result = 0;
-  for (var date in data) {
-    result += data[date];
+  for (var i in data) {
+    result += data[i].downloads;
   }
   return result.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
-function sanitizeData(json) {
-  var result = {};
-  var data = json.downloads;
+function calculate(data) {
+  var juttle = new EmbeddedJuttle(
+    'reduce val=sum(downloads) by day | sort day | put time = Date.new(day) ' +
+    '| ( reduce -every :day: val=sum(val) | put t=Date.unixms(time - :1d:) ' +
+    '      | put -over :28 days: avg=Math.floor(avg(val)) | view daily;' +
+    '    reduce -every :week: -on :1970-01-05: val=sum(val) | put t=Date.unixms(time - :1w:) ' +
+    '      | put -over :12 weeks: avg=Math.floor(avg(val)) | view weekly;' +
+    '    reduce -every :month: val=sum(val) | put t=Date.format(time - :1M:, "MMM YYYY") | view monthly;' +
+    '    reduce -every :year: val=sum(val) | put t=Date.format(time - :1y:, "YYYY") | view yearly )'
+  );
 
-  var date = null;
-  if (data) {
-    for (var i = 0; i < data.length; i++) {
-      date = data[i].day;
-      result[date] = data[i].downloads;
-    }
-  }
-
-  return result;
-}
-
-function getDailyData(data) {
-  var result = [];
-
-  var keys = Object.keys(data).sort();
-  for (var i = 0; i < keys.length; i++) {
-    result.push([ new Date(keys[i]).getTime(), data[keys[i]] ]);
-  }
-
-  return result;
-}
-
-function getWeekOfDate(d) {
-  var year = new Date(d.getFullYear(), 0, 1);
-  return Math.ceil((((d - year) / 86400000) + year.getDay() + 1) / 7);
-}
-
-function getWeeklyData(dailyData) {
-  var result = [];
-
-  var lastWeek = getWeekOfDate(new Date(dailyData[0][0]));
-  var weekTotal = 0;
-  var record, date;
-
-  for (var i in dailyData) {
-    record = dailyData[i];
-    date = new Date(record[0]);
-    if (lastWeek != getWeekOfDate(date)) {
-      result.push([ date.getTime(), weekTotal ]);
-      weekTotal = record[1];
-      lastWeek = getWeekOfDate(date);
-    } else {
-      weekTotal += record[1];
-      if (i == dailyData.length - 1)
-        result.push([ date.getTime(), weekTotal]);
-    }
-  }
-
-  return result;
-}
-
-var months = [ 'Dec', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep',
-    'Oct', 'Nov', 'Dec' ];
-
-function getMonthlyData(dailyData) {
-  var result = { categories: [], data: [] };
-
-  var lastMonth = new Date(dailyData[0][0]).getMonth();
-  var lastYear = new Date(dailyData[0][0]).getFullYear();
-  var monthTotal = 0;
-  var record, date;
-
-  for (var i = 0; i < dailyData.length; i++) {
-    record = dailyData[i];
-    date = new Date(record[0]);
-    if (lastMonth != date.getMonth()) {
-      result.categories.push(months[lastMonth + 1] + ' ' + lastYear);
-      result.data.push(monthTotal);
-      monthTotal = record[1];
-      lastMonth = date.getMonth();
-      lastYear = date.getFullYear();
-    } else {
-      monthTotal += record[1];
-      if (i == dailyData.length - 1) {
-        result.categories.push(months[date.getMonth() + 1] + ' ' + date.getFullYear());
-        result.data.push(monthTotal);
+  return juttle.run({wait: true, points: data})
+  .then(function(result) {
+    var data = {};
+    var views = Object.keys(result.output);
+    for (var i in views) {
+      var view = result.output[views[i]].type;
+      var points = result.output[views[i]].data;
+      data[view] = {values: [], cats: [], trend: []};
+      for (var j in points) {
+        if (view === 'daily' || view === 'weekly') {
+          data[view].values.push([points[j].point.t, points[j].point.val]);
+          data[view].trend.push([points[j].point.t, points[j].point.avg]);
+        } else {
+          data[view].values.push(points[j].point.val);
+          data[view].cats.push(points[j].point.t);
+        }
       }
     }
-  }
-
-  return result;
-}
-
-function getAnnualData(dailyData) {
-  var result = { categories: [], data: [] };
-
-  var lastYear = new Date(dailyData[0][0]).getFullYear();
-  var yearTotal = 0;
-  var record, date;
-
-  for (var i = 0; i < dailyData.length; i++) {
-    record = dailyData[i];
-    date = new Date(record[0]);
-    if (lastYear != date.getFullYear()) {
-      result.categories.push(lastYear.toString());
-      result.data.push(yearTotal);
-      yearTotal = record[1];
-      lastYear = date.getFullYear();
-    } else {
-      yearTotal += record[1];
-      if (i == dailyData.length - 1) {
-        result.categories.push(date.getFullYear().toString());
-        result.data.push(yearTotal);
-      }
-    }
-  }
-
-  return result;
+    return data;
+  });
 }
 
 function getPackageList(json) {
@@ -304,25 +221,26 @@ function dateToHumanString(date) {
 }
 
 function downloadsURL(pkg, from, to) {
-  return '/downloads/range/' + dateToString(from) + ':' + dateToString(to) + '/'
+  return 'https://api.npmjs.org/downloads/range/' + dateToString(from) + ':' + dateToString(to) + '/'
     + pkg;
 }
 
-function drawCharts(data) {
-  var dailyData = getDailyData(data);
-  $('#content figure').css('min-width', dailyData.length * 2 + 67);
-  chart('days', 'column', 'Downloads per day', dailyData, 'datetime', 'Date');
-  var weeklyData = getWeeklyData(dailyData);
-  chart('weeks', 'column', 'Downloads per week', weeklyData, 'datetime', 'Week');
-  var monthlyData = getMonthlyData(dailyData);
-  chart('months', 'column', 'Downloads per month', monthlyData.data,
-    'linear', 'Month', monthlyData.categories);
-  var annualData = getAnnualData(dailyData);
-  chart('years', 'column', 'Downloads per year', annualData.data,
-    'linear', 'Year', annualData.categories);
+function drawCharts(data, showTrend) {
+  calculate(data)
+  .then(function(result) {
+    $('#content figure').css('min-width', result.daily.values.length * 2 + 67);
+    chart('days', 'column', 'Downloads per day', result.daily.values,
+      'datetime', 'Day', undefined, showTrend && result.daily.trend);
+    chart('weeks', 'column', 'Downloads per week', result.weekly.values,
+      'datetime', 'Week', undefined, showTrend && result.weekly.trend);
+    chart('months', 'column', 'Downloads per month', result.monthly.values,
+      'linear', 'Month', result.monthly.cats, undefined, result.monthly.trend);
+    chart('years', 'column', 'Downloads per year', result.yearly.values,
+      'linear', 'Year', result.yearly.cats);
+  });
 }
 
-function showPackageStats(pkg, from, to) {
+function showPackageStats(pkg, from, to, showTrend) {
   $('h2').append(' for package "' + pkg + '"');
   $('#npm-stat input[name="package"]').attr('value', pkg);
   $('#npm-stat').after('<p id="loading"></p><p><a '
@@ -334,7 +252,7 @@ function showPackageStats(pkg, from, to) {
   var url = downloadsURL(pkg, from, to);
 
   getData(url, function (json) {
-    var data = sanitizeData(json);
+    var data = json.downloads;
     $('h2').after('<p>Total number of downloads between <em>'
       + dateToHumanString(from) + '</em> and <em>'
       + dateToHumanString(to) + '</em>: <strong>'
@@ -342,11 +260,11 @@ function showPackageStats(pkg, from, to) {
 
     $('#loading').remove();
 
-    drawCharts(data);
+    drawCharts(data, showTrend);
   });
 }
 
-function showAuthorStats(author, from, to) {
+function showAuthorStats(author, from, to, showTrend) {
   $('h2').html('Downloads for author "' + author + '"');
   $('#npm-stat input[name="author"]').attr('value', author);
   $('#npm-stat').after('<p id="loading"></p><p><a '
@@ -363,21 +281,14 @@ function showAuthorStats(author, from, to) {
     var len = pkgs.length;
     var todo = len;
 
-    var all = {};
+    var allDownloads = [];
     var totals = [];
     for (var i = 0; i < len; i++) {(function (pkg) {
       var url = downloadsURL(pkg, from, to);
       getData(url, function (json) {
-        var sanitized = sanitizeData(json);
+        allDownloads = allDownloads.concat(json.downloads);
 
-        for (var date in sanitized) {
-          if (!all[date])
-            all[date] = 0;
-
-          all[date] += sanitized[date];
-        }
-
-        var total = totalDownloads(sanitized);
+        var total = totalDownloads(json.downloads);
         totals.push({name: pkg, count: total});
 
         if (!--todo) {
@@ -385,7 +296,7 @@ function showAuthorStats(author, from, to) {
             + author + '</em> between <em>'
             + dateToHumanString(from) + '</em> and <em>'
             + dateToHumanString(to) + '</em>: <strong>'
-            + totalDownloads(all) + '</strong></p>');
+            + totalDownloads(allDownloads) + '</strong></p>');
 
           $('#loading').remove();
 
@@ -401,7 +312,7 @@ function showAuthorStats(author, from, to) {
               + t.name + '</a>, total downloads: '+t.count+'</li>');
           }
 
-          drawCharts(all);
+          drawCharts(allDownloads);
         }
       });
       })(pkgs[i]);
@@ -413,6 +324,7 @@ $(function() {
   var from, to;
   var fromParam = getURLParam('from');
   var toParam = getURLParam('to');
+  var showTrend = !!getURLParam('trend');
 
   if (toParam === null || fromParam === '') {
     to = new Date();
@@ -436,6 +348,8 @@ $(function() {
   }
   $('input[name="from"]').attr('value', dateToString(from));
 
+  $('input[name="trend"]').attr('checked', showTrend);
+
   var pkg;
 
   var author = getURLParam('author');
@@ -447,9 +361,9 @@ $(function() {
     }
 
     $('title').html('npm-stat: ' + pkg);
-    showPackageStats(pkg, from, to);
+    showPackageStats(pkg, from, to, showTrend);
   } else {
     $('title').html('npm-stat: ' + author);
-    showAuthorStats(author, from, to);
+    showAuthorStats(author, from, to, showTrend);
   }
 });
